@@ -20,6 +20,11 @@ dependencies = [
     "openpyxl>=3.1.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/donework/ctxvsrag"
+Repository = "https://github.com/donework/ctxvsrag"
+Issues = "https://github.com/donework/ctxvsrag/issues"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ctxvsrag"
+version = "0.1.0"
+description = "Benchmark full-context-in-prompt vs. RAG for a document, against Ollama, vLLM, LiteLLM, Open WebUI, or any OpenAI-compatible backend"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Dominic Neuburg", email = "dominic@done-work.com" },
+]
+dependencies = [
+    "ollama>=0.4.0",
+    "openai>=1.50.0",
+    "pypdf>=4.0.0",
+    "numpy>=1.26.0",
+    "openpyxl>=3.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+ctxvsrag = "ctxvsrag.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctxvsrag"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

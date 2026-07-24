@@ -127,7 +127,7 @@ ctxvsrag --pdf your_document.pdf \
 | `--chunk-words` | `300` | Words per RAG chunk (with overlap) |
 | `--questions` | *(built-in defaults)* | Text file, one question per line |
 | `--output` | `results.json` | Where to write raw results |
-| `--xlsx-output` | `report.xlsx` | Two-sheet Excel report for non-technical colleagues — see below. Empty string to skip |
+| `--report-output` | `report.pdf` | PDF report for non-technical colleagues — see below. Empty string to skip |
 | `--no-judge` | off | Skip the quality comparison (faster/cheaper iteration) |
 | `--excerpt-length` | `200` | Characters of each answer printed per question (`0` to disable) |
 
@@ -159,18 +159,25 @@ Ollama also appears to reuse the KV cache automatically when consecutive request
 
 RAG's `retrieval_s` includes one embedding API call per question plus the in-memory cosine-similarity search.
 
+**Time to first token** is measured on every backend (both Ollama and OpenAI-compatible, via streaming) as wall-clock time from request start to the first generated token. It's dominated by prompt processing, so it's the most direct, backend-agnostic way to see the effect the size of the input hypothesized above actually has: full-context pays a prefill tax proportional to the whole document on every request, while RAG's much smaller retrieved-chunk prompt should get a user their first visible token noticeably sooner. For RAG, the reported figure adds `retrieval_s` on top of the model's own first-token time, since that happens before generation starts and is still part of what a user waits through.
+
 Quality is scored by a second LLM call (the "judge") that sees the full document text, the question, and both answers with the labels **A/B randomized** to avoid position bias. It rates each answer 1–10 on accuracy, completeness, and clarity, and states a preference. Scores outside 1–10 (or answers that aren't valid JSON) are rejected and retried once, regardless of backend — schema-constrained decoding reduces how often that happens but isn't a hard guarantee on any backend.
+
+**Each question is judged twice** (independent calls, each with its own A/B randomization), and the six scores are averaged rather than trusting either single call — LLM judges are noisy on individual calls (a specific criticism can be flat-out hallucinated, or one ordering can tip a borderline verdict), and averaging two independent runs smooths that out. `preferred` is derived from the averaged score totals, not voted from either run's own `preferred` label. This roughly doubles the judge's share of a run's wall-clock time; use `--no-judge` if you just want speed/token numbers.
 
 The summary also prints a derived **efficiency** figure (avg. quality score ÷ avg. latency) for each approach — purely computed from the numbers above after the fact, never seen by the judge itself, so the quality/speed trade-off stays visible instead of being silently baked into one blended score.
 
 ## Sharing results
 
-Every run writes three outputs: the CLI printout, `--output` (raw JSON, everything, for further scripting/analysis), and `--xlsx-output` (`report.xlsx` by default) — a two-sheet Excel file meant to be handed to a colleague without needing to explain the tool first:
+Every run writes three outputs: the CLI printout, `--output` (raw JSON, everything, for further scripting/analysis), and `--report-output` (`report.pdf` by default) — a PDF meant to be handed to a colleague without needing to explain the tool first. It's rendered directly (matplotlib for the charts, reportlab for layout) rather than as a spreadsheet, so it looks identical wherever it's opened:
 
-- **"Results" sheet** — one row per question, answers and the judge's verdict/reasoning in the first columns, technical metrics (tokens, prompt-processing time, retrieved pages) further right. Ignore whatever columns don't mean anything to you.
-- **"Summary" sheet** — the exact same narrative text printed to the CLI, one line per row, so the overall story (which approach won, by how much, on speed vs. quality) is readable without opening the data sheet at all.
+- **Summary** — the exact same narrative text printed to the CLI, so the overall story (which approach won, by how much, on speed vs. quality) is readable on its own.
+- **Charts** — a bar chart comparing avg. latency, time to first token, and (if the judge ran) quality scores between both approaches, plus a pie chart of the judge's preference counts.
+- **Per-question detail** — for each question, both answers with a colored status bar from each answer's own perspective (green = judge preferred it, red = lost, orange = tie), the judge's reasoning and scores, and the raw latency/first-token/retrieved-page numbers.
 
-Set `--xlsx-output ""` to skip generating it.
+Token counts, tokens/s, and other fine-grained metrics aren't duplicated into the PDF (it's meant to stay readable, not become a second spreadsheet) — they're all still in `--output`'s JSON if you need them.
+
+Set `--report-output ""` to skip generating it.
 
 ## Development
 
@@ -178,7 +185,7 @@ Set `--xlsx-output ""` to skip generating it.
 pytest
 ```
 
-Tests use fake `ChatBackend`/`EmbedBackend` implementations (see `tests/conftest.py`) instead of a live server, so the suite runs in well under a second with no Ollama/vLLM/etc. required. It covers chunking, retrieval ranking, the judge's validation/retry/context-growth logic, the xlsx report's structure, and CLI argument parsing. It does **not** cover the end-to-end `main()` orchestration loop (needs a live backend) — that's exercised manually against `examples/example.pdf` before releases.
+Tests use fake `ChatBackend`/`EmbedBackend` implementations (see `tests/conftest.py`) instead of a live server, so the suite runs in well under a second with no Ollama/vLLM/etc. required. It covers chunking, retrieval ranking, the judge's validation/retry/context-growth logic, the PDF report's content (via `pypdf` text extraction), and CLI argument parsing. It does **not** cover the end-to-end `main()` orchestration loop (needs a live backend) — that's exercised manually against `examples/example.pdf` before releases.
 
 ## Project layout
 
@@ -191,7 +198,7 @@ src/ctxvsrag/
 ├── chunking.py                   splits page text into overlapping word-based chunks
 ├── rag_index.py                  embedding index + cosine-similarity retrieval, backend-agnostic
 ├── judge.py                      LLM-as-judge quality comparison
-├── report.py                     two-sheet .xlsx report for sharing with non-technical colleagues
+├── report.py                     PDF report for sharing with non-technical colleagues
 ├── approaches/
 │   ├── full_context.py           Approach A: whole document in every prompt
 │   └── rag_answer.py             Approach B: retrieve chunks, then answer

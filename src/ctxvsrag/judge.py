@@ -17,14 +17,27 @@ context pressure. So a response can be syntactically valid JSON with the
 right fields and still contain garbage values (e.g. a score of 0 or 100
 instead of 1-10). _chat_and_parse validates ranges explicitly rather than
 trusting the schema alone, and retries once if validation fails.
+
+Each question is judged JUDGE_RUNS times independently (each with its own A/B
+swap) and the scores averaged, rather than trusting a single call - LLM
+judges are noisy on individual calls (a specific criticism can be flat-out
+hallucinated, or one ordering can tip a borderline verdict), and averaging
+several independent runs smooths that out rather than reporting whichever
+run happened to run first. `preferred` is derived from the averaged scores
+rather than voted from each run's own `preferred` label, for the same reason
+build_summary_lines derives "efficiency" from raw numbers instead of trusting
+any single model-produced label.
 """
 
 import json
 import random
+import statistics
 from dataclasses import dataclass
 
 from .backends.base import ChatBackend
 from .pdf_utils import estimate_tokens
+
+JUDGE_RUNS = 2
 
 SCORE_FIELDS = ("accuracy_a", "accuracy_b", "completeness_a", "completeness_b", "clarity_a", "clarity_b")
 
@@ -65,6 +78,13 @@ JUDGE_SYSTEM = (
     "labels like any other factual claim. A citation matching the labeled "
     "source is correct and should not be penalized; a citation naming the "
     "wrong page is a real accuracy issue like any other incorrect claim. "
+    "An answer may also state that its source material doesn't cover some "
+    "fact, instead of guessing - one answer may have been given only an "
+    "excerpt of the document, not all of it, so this can be an honest, "
+    "correct statement about what it was given even when the fact appears "
+    "elsewhere in the full document you see. Score that only as a "
+    "completeness gap, not also as an accuracy fault - accuracy penalizes "
+    "fabricated or wrong claims, not the honest absence of a claim. "
     "Respond only with a JSON object with exactly these fields: accuracy_a, "
     "accuracy_b, completeness_a, completeness_b, clarity_a, clarity_b (each "
     'an integer 1-10), preferred ("A", "B", or "tie"), reasoning (brief '
@@ -107,6 +127,19 @@ class Judge:
         fc_output_tokens: int | None = None,
         rag_output_tokens: int | None = None,
     ) -> JudgeResult:
+        self._grow_context_if_needed(question, full_context_answer, rag_answer, fc_output_tokens, rag_output_tokens)
+
+        runs = [self._judge_once(question, full_context_answer, rag_answer) for _ in range(JUDGE_RUNS)]
+        return _average_judge_results(question, runs)
+
+    def _grow_context_if_needed(
+        self,
+        question: str,
+        full_context_answer: str,
+        rag_answer: str,
+        fc_output_tokens: int | None,
+        rag_output_tokens: int | None,
+    ) -> None:
         # Prefer the actually-measured output token counts from generating the
         # answers (exact) over re-estimating from character count (approximate).
         fc_tokens = fc_output_tokens if fc_output_tokens is not None else estimate_tokens(full_context_answer)
@@ -117,6 +150,7 @@ class Judge:
             self.current_num_ctx = 2 ** (needed - 1).bit_length()  # round up to reduce distinct sizes -> fewer reloads
             print(f"    (judge context grown {old_num_ctx} -> {self.current_num_ctx} tokens for this question's answer lengths)")
 
+    def _judge_once(self, question: str, full_context_answer: str, rag_answer: str) -> JudgeResult:
         swap = random.random() < 0.5
         answer_a, answer_b = (rag_answer, full_context_answer) if swap else (full_context_answer, rag_answer)
 
@@ -174,3 +208,33 @@ class Judge:
             except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
                 last_error = e
         raise JudgeParseError(f"Judge didn't return valid JSON after 2 attempts: {last_error}")
+
+
+def _average_judge_results(question: str, runs: list[JudgeResult]) -> JudgeResult:
+    fc_scores = {
+        field: round(statistics.mean(r.full_context_scores[field] for r in runs), 1)
+        for field in ("accuracy", "completeness", "clarity")
+    }
+    rag_scores = {
+        field: round(statistics.mean(r.rag_scores[field] for r in runs), 1)
+        for field in ("accuracy", "completeness", "clarity")
+    }
+
+    fc_total = sum(fc_scores.values())
+    rag_total = sum(rag_scores.values())
+    if fc_total > rag_total:
+        preferred = "full_context"
+    elif rag_total > fc_total:
+        preferred = "rag"
+    else:
+        preferred = "tie"
+
+    reasoning = " | ".join(f"Run {i + 1}: {r.reasoning}" for i, r in enumerate(runs))
+
+    return JudgeResult(
+        question=question,
+        full_context_scores=fc_scores,
+        rag_scores=rag_scores,
+        preferred=preferred,
+        reasoning=reasoning,
+    )

@@ -23,6 +23,13 @@ class ChatResult:
     # splits out prompt-processing vs. generation duration per call.
     prompt_eval_s: Optional[float] = None
     eval_s: Optional[float] = None
+    # Wall-clock time from request start to the first streamed token. Dominated
+    # by prompt processing (prefill) time, so this is the number that actually
+    # shows a user-facing effect of "more input tokens" (full-context) vs.
+    # "fewer input tokens" (RAG) - unlike prompt_eval_s, it's measurable on
+    # every backend since it only requires streaming, not native duration
+    # reporting. None if the backend call produced no output at all.
+    time_to_first_token_s: Optional[float] = None
 
     @property
     def precise_timing(self) -> bool:

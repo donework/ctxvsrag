@@ -26,7 +26,7 @@ from .chunking import chunk_pages
 from .judge import Judge, JudgeParseError
 from .pdf_utils import estimate_tokens, extract_pages
 from .rag_index import EmbeddingIndex, default_prefixes_for
-from .report import save_xlsx_report
+from .report import save_pdf_report
 
 DEFAULT_QUESTIONS = [
     "Summarize the document's key points in 5 bullet points.",
@@ -64,7 +64,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chunk-words", type=int, default=300)
     parser.add_argument("--questions", help="Optional text file, one question per line")
     parser.add_argument("--output", default="results.json")
-    parser.add_argument("--xlsx-output", default="report.xlsx", help="Two-sheet Excel report (data + readable summary) for sharing with non-technical colleagues. Set to an empty string to skip")
+    parser.add_argument("--report-output", default="report.pdf", help="PDF report (summary, charts, per-question detail) for sharing with non-technical colleagues. Set to an empty string to skip")
     parser.add_argument("--no-judge", action="store_true", help="Skip the quality comparison")
     parser.add_argument("--excerpt-length", type=int, default=200, help="Characters of each answer to print per question (0 to disable)")
     return parser
@@ -175,9 +175,9 @@ def main() -> int:
 
     save_results(args.output, full_context_results, rag_results, judge_results)
 
-    if args.xlsx_output:
-        save_xlsx_report(args.xlsx_output, full_context_results, rag_results, judge_results, summary_lines)
-        print(f"Report saved: {args.xlsx_output}")
+    if args.report_output:
+        save_pdf_report(args.report_output, full_context_results, rag_results, judge_results, summary_lines)
+        print(f"Report saved: {args.report_output}")
 
     return 0
 
@@ -193,6 +193,8 @@ def _format_result(result, extra: str = "") -> str:
     parts = [f"{result.total_duration_s:.2f}s"]
     if extra:
         parts.append(f"({extra})")
+    if result.time_to_first_token_s is not None:
+        parts.append(f"first token={result.time_to_first_token_s:.2f}s")
     if result.precise_timing:
         parts.append(f"prompt={result.prompt_tokens}tok ({result.prompt_eval_s:.2f}s)")
         parts.append(f"out={result.output_tokens}tok ({result.tokens_per_s:.1f} tok/s)")
@@ -203,9 +205,9 @@ def _format_result(result, extra: str = "") -> str:
 
 def build_summary_lines(fc_results, rag_results, judge_results) -> list[str]:
     """The narrative summary, as a list of lines - used both for the CLI
-    printout and as the readable "Summary" sheet in the .xlsx report, so
+    printout and as the summary section of the PDF report, so
     there's exactly one place that composes this text."""
-    lines = ["=" * 70, "SUMMARY", "=" * 70]
+    lines = ["SUMMARY"]
 
     fc_latencies = [r.result.total_duration_s for r in fc_results]
     rag_latencies = [r.result.total_duration_s + r.retrieval_s for r in rag_results]
@@ -213,9 +215,22 @@ def build_summary_lines(fc_results, rag_results, judge_results) -> list[str]:
     rag_tok_s = [r.result.tokens_per_s for r in rag_results if r.result.tokens_per_s > 0]
     precise = fc_results[0].result.precise_timing if fc_results else False
 
+    # Wall-clock time until the first token, incl. retrieval for RAG (that
+    # happens before the model call, so it's part of what the user waits
+    # through) - this is the number that most directly shows whether feeding
+    # fewer input tokens (RAG) actually gets a user their first token sooner
+    # than stuffing the whole document in (full-context).
+    fc_ttfts = [r.result.time_to_first_token_s for r in fc_results if r.result.time_to_first_token_s is not None]
+    rag_ttfts = [
+        r.result.time_to_first_token_s + r.retrieval_s
+        for r in rag_results if r.result.time_to_first_token_s is not None
+    ]
+
     lines.append("")
     lines.append(f"Full-context ({len(fc_results)} questions):")
     lines.append(f"  Total latency: avg={statistics.mean(fc_latencies):.2f}s min={min(fc_latencies):.2f}s max={max(fc_latencies):.2f}s")
+    if fc_ttfts:
+        lines.append(f"  Time to first token: avg={statistics.mean(fc_ttfts):.2f}s min={min(fc_ttfts):.2f}s max={max(fc_ttfts):.2f}s")
     if precise:
         fc_prompt_eval = [r.result.prompt_eval_s for r in fc_results]
         lines.append(f"  Prompt processing: avg={statistics.mean(fc_prompt_eval):.2f}s (dominates with long context)")
@@ -224,10 +239,17 @@ def build_summary_lines(fc_results, rag_results, judge_results) -> list[str]:
     lines.append("")
     lines.append(f"RAG ({len(rag_results)} questions):")
     lines.append(f"  Total latency: avg={statistics.mean(rag_latencies):.2f}s min={min(rag_latencies):.2f}s max={max(rag_latencies):.2f}s")
+    if rag_ttfts:
+        lines.append(f"  Time to first token: avg={statistics.mean(rag_ttfts):.2f}s min={min(rag_ttfts):.2f}s max={max(rag_ttfts):.2f}s (incl. retrieval)")
     if precise:
         rag_prompt_eval = [r.result.prompt_eval_s for r in rag_results]
         lines.append(f"  Prompt processing: avg={statistics.mean(rag_prompt_eval):.2f}s (only the retrieved chunks)")
     lines.append(f"  Generation speed: avg={statistics.mean(rag_tok_s):.1f} tok/s" + ("" if precise else " (estimated)") if rag_tok_s else "  Generation speed: n/a")
+
+    if fc_ttfts and rag_ttfts:
+        lines.append("")
+        ratio = statistics.mean(fc_ttfts) / statistics.mean(rag_ttfts) if statistics.mean(rag_ttfts) > 0 else None
+        lines.append(f"Time-to-first-token ratio (Full-context / RAG): {ratio:.2f}x" if ratio else "")
 
     if judge_results:
         prefs = [j.preferred for j in judge_results]

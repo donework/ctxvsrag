@@ -23,7 +23,7 @@ class OllamaBackend:
         json_schema: Optional[dict] = None,
     ) -> ChatResult:
         start = time.perf_counter()
-        response = self.client.chat(
+        stream = self.client.chat(
             model=model,
             messages=[
                 {"role": "system", "content": system},
@@ -31,16 +31,31 @@ class OllamaBackend:
             ],
             format=json_schema,
             options={"num_ctx": num_ctx} if num_ctx else None,
+            stream=True,
         )
+
+        # Streamed rather than a single call so we can time the first token -
+        # the final chunk (done=True) still carries the same aggregate counts/
+        # durations a non-streamed call would, so nothing else changes.
+        time_to_first_token = None
+        text_parts = []
+        final_chunk = None
+        for chunk in stream:
+            if time_to_first_token is None and chunk.message.content:
+                time_to_first_token = time.perf_counter() - start
+            text_parts.append(chunk.message.content or "")
+            final_chunk = chunk
         total_duration = time.perf_counter() - start
 
+        final_chunk = final_chunk or {}
         return ChatResult(
-            text=response.message.content or "",
-            prompt_tokens=response.get("prompt_eval_count") or 0,
-            output_tokens=response.get("eval_count") or 0,
+            text="".join(text_parts),
+            prompt_tokens=final_chunk.get("prompt_eval_count") or 0,
+            output_tokens=final_chunk.get("eval_count") or 0,
             total_duration_s=total_duration,
-            prompt_eval_s=(response.get("prompt_eval_duration") or 0) / 1e9,
-            eval_s=(response.get("eval_duration") or 0) / 1e9,
+            prompt_eval_s=(final_chunk.get("prompt_eval_duration") or 0) / 1e9,
+            eval_s=(final_chunk.get("eval_duration") or 0) / 1e9,
+            time_to_first_token_s=time_to_first_token,
         )
 
     def embed(self, model: str, texts: list[str]) -> list[list[float]]:

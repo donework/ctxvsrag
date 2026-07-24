@@ -6,7 +6,9 @@ Two things are deliberately weaker here than the native Ollama backend:
 1. Timing: these APIs report only total prompt/completion token counts, no
    separate prompt-processing vs. generation duration. `ChatResult` reflects
    that (prompt_eval_s/eval_s stay None; tokens_per_s falls back to an
-   estimate from wall-clock time).
+   estimate from wall-clock time). time_to_first_token_s is still measured
+   precisely though, via streaming - it doesn't need any server-reported
+   duration, just the wall-clock gap until the first chunk arrives.
 
 2. Structured output: strict JSON-schema enforcement (vLLM's guided decoding,
    OpenAI's `json_schema` response format) isn't reliably available across
@@ -47,22 +49,39 @@ class OpenAICompatBackend:
             kwargs["response_format"] = {"type": "json_object"}
 
         start = time.perf_counter()
-        response = self.client.chat.completions.create(
+        stream = self.client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            stream=True,
+            # Asks the final chunk to carry the same usage totals a non-streamed
+            # call's `response.usage` would - widely supported (OpenAI, vLLM,
+            # LiteLLM) but not guaranteed on every target this backend serves;
+            # if a server ignores/rejects it, usage just stays None like before.
+            stream_options={"include_usage": True},
             **kwargs,
         )
+
+        time_to_first_token = None
+        text_parts = []
+        usage = None
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                if time_to_first_token is None:
+                    time_to_first_token = time.perf_counter() - start
+                text_parts.append(chunk.choices[0].delta.content)
+            if chunk.usage is not None:
+                usage = chunk.usage
         total_duration = time.perf_counter() - start
 
-        usage = response.usage
         return ChatResult(
-            text=response.choices[0].message.content or "",
+            text="".join(text_parts),
             prompt_tokens=usage.prompt_tokens if usage else 0,
             output_tokens=usage.completion_tokens if usage else 0,
             total_duration_s=total_duration,
+            time_to_first_token_s=time_to_first_token,
         )
 
     def embed(self, model: str, texts: list[str]) -> list[list[float]]:
